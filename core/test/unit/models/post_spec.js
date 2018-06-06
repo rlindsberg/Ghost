@@ -1,11 +1,12 @@
 /* eslint no-invalid-this:0 */
 
-const should = require('should'), // jshint ignore:line
+const should = require('should'),
     sinon = require('sinon'),
     _ = require('lodash'),
     testUtils = require('../../utils'),
     knex = require('../../../server/data/db').knex,
     settingsCache = require('../../../server/services/settings/cache'),
+    urlService = require('../../../server/services/url'),
     schema = require('../../../server/data/schema'),
     models = require('../../../server/models'),
     common = require('../../../server/lib/common'),
@@ -27,6 +28,7 @@ describe('Unit: models/post', function () {
 
     beforeEach(function () {
         sandbox.stub(security.password, 'hash').resolves('$2a$10$we16f8rpbrFZ34xWj0/ZC.LTPUux8ler7bcdTs5qIleN6srRHhilG');
+        sandbox.stub(urlService, 'getUrlByResourceId');
     });
 
     afterEach(function () {
@@ -39,22 +41,6 @@ describe('Unit: models/post', function () {
 
     after(function () {
         sandbox.restore();
-    });
-
-    describe('findPage', function () {
-        /**
-         * This is a @bug.
-         * If you don't include tags, we can't generate the url properly.
-         * Will be fixed when merging channels, because the post model has no longer generate the url.
-         */
-        it('[bug] permalink: /:primary_tag/:slug/, columns: [title,url]', function () {
-            sandbox.stub(settingsCache, 'get').withArgs('permalinks').returns('/:primary_tag/:slug/');
-
-            return models.Post.findPage({columns: ['title', 'url']})
-                .then(function (result) {
-                    result.posts[0].url.should.eql('/all/html-ipsum/');
-                });
-        });
     });
 
     describe('add', function () {
@@ -1886,6 +1872,67 @@ describe('Unit: models/post', function () {
                 ).then(() => {
                     should(mockPostObj.get.called).be.false();
                 });
+            });
+        });
+    });
+
+    describe('Mobiledoc conversion', function () {
+        let labs = require('../../../server/services/labs');
+        let origLabs = _.cloneDeep(labs);
+        let events;
+
+        beforeEach(function () {
+            events = {
+                post: []
+            };
+
+            sandbox.stub(models.Post.prototype, 'emitChange').callsFake(function (event) {
+                events.post.push({event: event, data: this.toJSON()});
+            });
+        });
+
+        it('uses v2 if Koenig is enabled', function () {
+            sandbox.stub(labs, 'isSet').callsFake(function (key) {
+                if (key === 'koenigEditor') {
+                    return true;
+                }
+                return origLabs.get(key);
+            });
+
+            let newPost = testUtils.DataGenerator.forModel.posts[2];
+
+            return models.Post.add(
+                newPost,
+                testUtils.context.editor
+            ).then((post) => {
+                should.exist(post);
+                post.has('html').should.equal(true);
+                post.get('html').should.equal('<div class="kg-post">\n<h2 id="testing">testing</h2>\n<p>mctesters</p>\n<ul>\n<li>test</li>\n<li>line</li>\n<li>items</li>\n</ul>\n\n</div>');
+            });
+        });
+
+        it('uses v2 if Koenig is disabled but post is not v1 compatible', function () {
+            let newPost = testUtils.DataGenerator.forModel.posts[2];
+
+            newPost.mobiledoc = JSON.stringify({
+                version: '0.3.1',
+                atoms: [],
+                cards: [],
+                markups: [],
+                sections: [
+                    [1, 'p', [
+                        [0, [], 0, 'Test']
+                    ]]
+                ]
+            });
+
+            return models.Post.add(
+                newPost,
+                testUtils.context.editor
+            ).then((post) => {
+                should.exist(post);
+                post.has('html').should.equal(true);
+                post.get('html').should.equal('<div class="kg-post">\n<p>Test</p>\n</div>');
             });
         });
     });

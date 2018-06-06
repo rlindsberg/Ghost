@@ -9,6 +9,7 @@ var _ = require('lodash'),
     htmlToText = require('html-to-text'),
     ghostBookshelf = require('./base'),
     config = require('../config'),
+    labs = require('../services/labs'),
     converters = require('../lib/mobiledoc/converters'),
     urlService = require('../services/url'),
     relations = require('./relations'),
@@ -185,7 +186,7 @@ Post = ghostBookshelf.Model.extend({
             prevSlug = this.previous('slug'),
             publishedAt = this.get('published_at'),
             publishedAtHasChanged = this.hasDateChanged('published_at', {beforeWrite: true}),
-            mobiledoc = this.get('mobiledoc'),
+            mobiledoc = JSON.parse(this.get('mobiledoc') || null),
             generatedFields = ['html', 'plaintext'],
             tagsToSave,
             ops = [];
@@ -249,8 +250,36 @@ Post = ghostBookshelf.Model.extend({
             }
         });
 
+        // render mobiledoc to HTML. Switch render version if Koenig is enabled
+        // or has been edited with Koenig and is no longer compatible with the
+        // Ghost 1.0 markdown-only renderer
+        // TODO: re-render all content and remove the version toggle for Ghost 2.0
         if (mobiledoc) {
-            this.set('html', converters.mobiledocConverter.render(JSON.parse(mobiledoc)));
+            let version = 1;
+            let koenigEnabled = labs.isSet('koenigEditor') === true;
+
+            let mobiledocIsCompatibleWithV1 = function mobiledocIsCompatibleWithV1(doc) {
+                if (doc
+                    && doc.markups.length === 0
+                    && doc.cards.length === 1
+                    && doc.cards[0][0].match(/(?:card-)?markdown/)
+                    && doc.sections.length === 1
+                    && doc.sections[0].length === 2
+                    && doc.sections[0][0] === 10
+                    && doc.sections[0][1] === 0
+                ) {
+                    return true;
+                }
+
+                return false;
+            };
+
+            if (koenigEnabled || !mobiledocIsCompatibleWithV1(mobiledoc)) {
+                version = 2;
+            }
+
+            let html = converters.mobiledocConverter.render(mobiledoc, version);
+            this.set('html', html);
         }
 
         if (this.hasChanged('html') || !this.get('plaintext')) {
@@ -367,30 +396,23 @@ Post = ghostBookshelf.Model.extend({
      * But the model layer is complex and needs specific fields in specific situations.
      *
      * ### url generation
-     *   - it needs the following attrs for permalinks
+     *   - @TODO: with dynamic routing, we no longer need default columns to fetch
+     *   - because with static routing Ghost generated the url on runtime and needed the following attributes:
      *     - `slug`: /:slug/
      *     - `published_at`: /:year/:slug
      *     - `author_id`: /:author/:slug, /:primary_author/:slug
-     *   - @TODO: with channels, we no longer need these
-     *     - because the url service pre-generates urls based on the resources
+     *     - now, the UrlService pre-generates urls based on the resources
      *     - you can ask `urlService.getUrlByResourceId(post.id)`
-     *   - @TODO: there is currently a bug in here
-     *     - you request `fields=title,url`
-     *     - you don't use `include=tags`
-     *     - your permalink is `/:primary_tag/:slug/`
-     *     - we won't fetch the primary tag, ends in `url = /all/my-slug/`
-     *     - will be auto fixed when merging channels
-     *   - url generator when using `findAll` or `findOne` doesn't work either when using e.g. `columns: title`
-     *      - this is because both functions don't make use of `defaultColumnsToFetch`
-     *      - will be auto fixed when merging channels
      *
      * ### events
      *   - you call `findAll` with `columns: id`
-     *   - then you trigger `post.save()`
+     *   - then you trigger `post.save()` on the response
      *   - bookshelf events (`onSaving`) and model events (`emitChange`) are triggered
-     *   - @TODO: we need to disallow this
+     *   - but you only fetched the id column, this will trouble (!), because the event hooks require more
+     *     data than just the id
+     *   - @TODO: we need to disallow this (!)
      *   - you should use `models.Post.edit(..)`
-     *   - editing resources denies `columns`
+     *      - this disallows using the `columns` option
      *   - same for destroy - you should use `models.Post.destroy(...)`
      *
      * @IMPORTANT: This fn should **never** be used when updating models (models.Post.edit)!
@@ -437,7 +459,7 @@ Post = ghostBookshelf.Model.extend({
         }
 
         if (!options.columns || (options.columns && options.columns.indexOf('url') > -1)) {
-            attrs.url = urlService.utils.urlPathForPost(attrs);
+            attrs.url = urlService.getUrlByResourceId(attrs.id);
         }
 
         if (oldPostId) {
@@ -548,7 +570,8 @@ Post = ghostBookshelf.Model.extend({
             validOptions = {
                 findOne: ['columns', 'importing', 'withRelated', 'require'],
                 findPage: ['page', 'limit', 'columns', 'filter', 'order', 'status', 'staticPages'],
-                findAll: ['columns', 'filter']
+                findAll: ['columns', 'filter'],
+                destroy: ['destroyAll']
             };
 
         // The post model additionally supports having a formats option
